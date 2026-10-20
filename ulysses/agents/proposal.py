@@ -27,7 +27,7 @@ from pathlib import Path
 import httpx
 from langchain_core.language_models.chat_models import BaseChatModel
 from loguru import logger
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from ulysses.config.profile import Profile
 from ulysses.models import BudgetType, GeneratedProposal, JobPost, JobScore, Milestone
@@ -208,6 +208,21 @@ class _ProposalLLMOutput(BaseModel):
         "Empty list if that count is 0.",
     )
 
+    @field_validator("milestones", mode="before")
+    @classmethod
+    def _coerce_empty_string_to_empty_list(cls, value: object) -> object:
+        """Tolerate Claude emitting "" instead of [] for a zero-milestone tool call.
+
+        Confirmed in production: when the prompt asks for 0 milestones, Claude's
+        tool-call args sometimes carry an empty string for this field rather than
+        an actual empty list, which strict `list[str]` validation would otherwise
+        reject outright and crash the whole proposal. Any non-empty value is passed
+        through unchanged so a genuinely malformed non-empty response still fails
+        validation (and is retried -- see `ainvoke_with_retry`) instead of being
+        silently swallowed.
+        """
+        return [] if value == "" else value
+
 
 def classify_category(job: JobPost) -> str:
     """Classify a job into one of the proposal template categories.
@@ -314,9 +329,10 @@ def _build_milestones(
 ) -> list[Milestone]:
     """Assemble the final milestone breakdown: LLM descriptions, deterministic $/day splits.
 
-    Returns an empty list when `count` is 0 -- either because the job is hourly
-    (no `total_days`) or because a single-milestone job doesn't warrant a separate
-    breakdown section (that case is just the standard one-payment pricing line).
+    Returns an empty list when `count` is 0, which only happens for hourly jobs
+    (no `total_days` -- Upwork doesn't support milestones on hourly contracts at
+    all). Every fixed-price job gets at least one milestone, even quick 1-day
+    jobs, so the breakdown is always visible alongside the pricing line.
     """
     if count == 0 or total_days is None:
         return []
@@ -335,8 +351,8 @@ def render_milestones_block(milestones: list[Milestone]) -> str:
     Not part of `full_text` -- Upwork's actual milestone breakdown is a structured
     feature set up separately from the cover-letter text, so this is informational,
     for Alejandro to copy into that UI when he sets up the contract, not meant to be
-    pasted verbatim into the proposal box itself. Returns "" when there are none
-    (hourly jobs, or jobs too small to warrant a multi-payment breakdown).
+    pasted verbatim into the proposal box itself. Returns "" only for hourly jobs,
+    which don't have milestones on Upwork at all.
     """
     if not milestones:
         return ""
@@ -402,8 +418,7 @@ class ProposalAgent:
         timeline, bid_usd, days = estimate_timeline_and_bid(job, profile)
         pricing_line = _render_pricing_line(job.budget.type, timeline, bid_usd)
 
-        raw_milestone_count = milestone_count_for_days(days)
-        milestone_count = raw_milestone_count if raw_milestone_count >= 2 else 0
+        milestone_count = milestone_count_for_days(days)
 
         # No `temperature` override: Claude 4+ models (e.g. Sonnet 5) reject any
         # non-default sampling parameter with a 400, so this must stay portable

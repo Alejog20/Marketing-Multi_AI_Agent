@@ -35,6 +35,7 @@ from langchain_core.runnables import Runnable
 from langchain_openai import ChatOpenAI
 from openai import APIError as OpenAIAPIError
 from openai import APITimeoutError as OpenAIAPITimeoutError
+from pydantic import ValidationError
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from ulysses.config.settings import LlmProvider, get_settings
@@ -46,8 +47,19 @@ _MAX_RETRIES = 3
 _EMBED_CONTENT_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:embedContent"
 
 _llm_retry = retry(
+    # `ValidationError` covers `.with_structured_output(...)` calls where the model's
+    # tool-call args don't match the expected schema (confirmed in production: Claude
+    # occasionally emits a malformed field, e.g. "" instead of [] for a list) -- a
+    # resampled completion is likely to come back valid, so this is worth a retry
+    # exactly like a transient API/timeout error rather than failing the whole job.
     retry=retry_if_exception_type(
-        (OpenAIAPIError, OpenAIAPITimeoutError, AnthropicAPIError, AnthropicAPITimeoutError)
+        (
+            OpenAIAPIError,
+            OpenAIAPITimeoutError,
+            AnthropicAPIError,
+            AnthropicAPITimeoutError,
+            ValidationError,
+        )
     ),
     wait=wait_exponential(multiplier=1, min=2, max=20),
     stop=stop_after_attempt(_MAX_RETRIES),

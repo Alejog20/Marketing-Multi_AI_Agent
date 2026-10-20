@@ -6,10 +6,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
+from pydantic import ValidationError
 from pytest_mock import MockerFixture
 
 from ulysses.agents.proposal import (
     ProposalAgent,
+    _ProposalLLMOutput,
     classify_category,
     estimate_timeline_and_bid,
     milestone_count_for_days,
@@ -181,6 +183,37 @@ class TestValidateProposalText:
         assert validate_proposal_text("Great fit \U0001f680 for this \U0001f525 project.") == []
 
 
+class TestProposalLlmOutputMilestonesCoercion:
+    """Regression tests for the production crash: Claude's tool-call args carried `""`
+
+    instead of `[]` for a zero-milestone response, which strict `list[str]`
+    validation rejected and crashed the whole proposal with no retry possible.
+    """
+
+    def _kwargs(self, **overrides: object) -> dict[str, object]:
+        base: dict[str, object] = {
+            "hook": "Hook.",
+            "plan_bullet_1": "Step one.",
+            "plan_bullet_2": "Step two.",
+            "plan_bullet_3": "Step three.",
+            "close": "Close.",
+        }
+        base.update(overrides)
+        return base
+
+    def test_empty_string_milestones_coerces_to_empty_list(self) -> None:
+        output = _ProposalLLMOutput(**self._kwargs(milestones=""))
+        assert output.milestones == []
+
+    def test_real_list_milestones_passes_through_unchanged(self) -> None:
+        output = _ProposalLLMOutput(**self._kwargs(milestones=["First", "Second"]))
+        assert output.milestones == ["First", "Second"]
+
+    def test_non_empty_malformed_milestones_still_raises(self) -> None:
+        with pytest.raises(ValidationError):
+            _ProposalLLMOutput(**self._kwargs(milestones="not a list"))
+
+
 class TestProposalAgentGenerate:
     @pytest.fixture
     def mock_llm(self) -> MagicMock:
@@ -346,15 +379,23 @@ class TestProposalAgentGenerate:
         assert "Ongoing (hourly)" not in result.full_text
         assert "$40/hr" in result.full_text
 
-    async def test_generate_yields_no_milestones_for_a_short_job(
+    async def test_generate_produces_a_single_milestone_for_a_short_job(
         self, fresh_job: JobPost, profile: Profile, mock_llm: MagicMock
     ) -> None:
+        """Short fixed-price jobs (1-2 day estimate, like this $150 job) still get one
+
+        milestone covering the full scope/timeline/pricing, rather than suppressing the
+        breakdown entirely -- the pricing line folded into the close sentence alone
+        wasn't surfacing the deliverable clearly enough on its own.
+        """
         score = score_job(fresh_job, profile)
         agent = ProposalAgent(llm=mock_llm, examples=[])
 
         result = await agent.generate(fresh_job, score, profile)
 
-        assert result.milestones == []
+        assert len(result.milestones) == 1
+        assert result.milestones[0].amount_usd == 150.0
+        assert result.milestones[0].days == 2
         assert "Suggested milestones" not in result.full_text
 
     async def test_generate_yields_no_milestones_for_hourly_jobs(

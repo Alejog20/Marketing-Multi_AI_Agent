@@ -9,6 +9,7 @@ import pytest
 from langchain_anthropic import ChatAnthropic
 from langchain_openai import ChatOpenAI
 from openai import APITimeoutError
+from pydantic import BaseModel, ValidationError
 from pytest_mock import MockerFixture
 
 from ulysses.config.settings import get_settings
@@ -29,6 +30,19 @@ def _set_required_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _timeout_error() -> APITimeoutError:
     return APITimeoutError(request=_FAKE_REQUEST)
+
+
+class _DummyStructuredOutput(BaseModel):
+    items: list[str]
+
+
+def _validation_error() -> ValidationError:
+    """A real `pydantic.ValidationError`, matching what a malformed tool call raises."""
+    try:
+        _DummyStructuredOutput(items="not a list")
+    except ValidationError as exc:
+        return exc
+    raise AssertionError("expected ValidationError")
 
 
 class TestGetLlm:
@@ -104,6 +118,30 @@ class TestAinvokeWithRetry:
         runnable = AsyncMock()
         runnable.ainvoke = AsyncMock(side_effect=_timeout_error())
         with pytest.raises(APITimeoutError):
+            await ainvoke_with_retry(runnable, {})
+        assert runnable.ainvoke.await_count == 3
+
+    async def test_retries_on_structured_output_validation_error_then_succeeds(
+        self, mocker: MockerFixture
+    ) -> None:
+        """Regression test: a malformed structured-output response (e.g. Claude returning
+
+        `""` instead of `[]` for a list field) must be retried like a transient API
+        error, not fail the whole job on the first bad completion.
+        """
+        mocker.patch("asyncio.sleep", AsyncMock())
+        runnable = AsyncMock()
+        runnable.ainvoke = AsyncMock(side_effect=[_validation_error(), "ok"])
+        assert await ainvoke_with_retry(runnable, {}) == "ok"
+        assert runnable.ainvoke.await_count == 2
+
+    async def test_reraises_validation_error_after_exhausting_retries(
+        self, mocker: MockerFixture
+    ) -> None:
+        mocker.patch("asyncio.sleep", AsyncMock())
+        runnable = AsyncMock()
+        runnable.ainvoke = AsyncMock(side_effect=_validation_error())
+        with pytest.raises(ValidationError):
             await ainvoke_with_retry(runnable, {})
         assert runnable.ainvoke.await_count == 3
 

@@ -1,4 +1,12 @@
-import type { Analytics, DashboardEvent, JobDetail, JobSource, JobSummary, Stats } from './types'
+import type {
+  Analytics,
+  ChatMessage,
+  DashboardEvent,
+  JobDetail,
+  JobSource,
+  JobSummary,
+  Stats,
+} from './types'
 
 async function parseOrThrow<T>(response: Response): Promise<T> {
   if (!response.ok) {
@@ -104,12 +112,87 @@ export function prototypeZipUrl(jobId: string): string {
   return `/api/jobs/${jobId}/prototype.zip`
 }
 
+export async function getChatMessages(threadId: string): Promise<ChatMessage[]> {
+  const response = await fetch(`/api/chat/${threadId}/messages`)
+  return parseOrThrow<ChatMessage[]>(response)
+}
+
+export async function clearChatThread(threadId: string): Promise<void> {
+  const response = await fetch(`/api/chat/${threadId}/messages`, { method: 'DELETE' })
+  if (!response.ok) {
+    throw new Error(`${response.status} ${response.statusText}`)
+  }
+}
+
+export interface ChatStreamHandlers {
+  onDelta: (text: string) => void
+  onDone: () => void
+  onError: (detail: string) => void
+}
+
+export interface ChatConnection {
+  send: (message: string) => void
+  disconnect: () => void
+}
+
+/**
+ * Opens a streaming chat WebSocket for one thread and reconnects with
+ * backoff if it drops -- same self-healing shape as `connectEvents`, but
+ * also exposes `send` since the caller actively pushes messages over it
+ * rather than only listening.
+ */
+export function connectChat(threadId: string, handlers: ChatStreamHandlers): ChatConnection {
+  let socket: WebSocket | null = null
+  let retryDelayMs = 1000
+  let stopped = false
+
+  const connect = (): void => {
+    if (stopped) return
+    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
+    socket = new WebSocket(`${protocol}://${window.location.host}/ws/chat/${threadId}`)
+
+    socket.onmessage = (message) => {
+      const data = JSON.parse(message.data) as { type: string; text?: string; detail?: string }
+      if (data.type === 'delta' && data.text) {
+        handlers.onDelta(data.text)
+      } else if (data.type === 'done') {
+        handlers.onDone()
+      } else if (data.type === 'error') {
+        handlers.onError(data.detail ?? 'Something went wrong.')
+      }
+    }
+    socket.onopen = () => {
+      retryDelayMs = 1000
+    }
+    socket.onclose = () => {
+      if (stopped) return
+      setTimeout(connect, retryDelayMs)
+      retryDelayMs = Math.min(retryDelayMs * 2, 15000)
+    }
+  }
+
+  connect()
+
+  return {
+    send: (message: string) => {
+      socket?.send(JSON.stringify({ message }))
+    },
+    disconnect: () => {
+      stopped = true
+      socket?.close()
+    },
+  }
+}
+
 /**
  * Opens the live-events WebSocket and reconnects with backoff if it drops --
  * the dashboard should keep self-healing across a brief backend restart
  * without the user needing to reload the page.
  */
-export function connectEvents(onEvent: (event: DashboardEvent) => void): () => void {
+export function connectEvents(
+  onEvent: (event: DashboardEvent) => void,
+  onConnectionChange?: (connected: boolean) => void,
+): () => void {
   let socket: WebSocket | null = null
   let retryDelayMs = 1000
   let stopped = false
@@ -124,8 +207,10 @@ export function connectEvents(onEvent: (event: DashboardEvent) => void): () => v
     }
     socket.onopen = () => {
       retryDelayMs = 1000
+      onConnectionChange?.(true)
     }
     socket.onclose = () => {
+      onConnectionChange?.(false)
       if (stopped) return
       setTimeout(connect, retryDelayMs)
       retryDelayMs = Math.min(retryDelayMs * 2, 15000)
