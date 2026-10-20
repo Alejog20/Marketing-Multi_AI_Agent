@@ -379,15 +379,23 @@ class TestProposalAgentGenerate:
         assert "Ongoing (hourly)" not in result.full_text
         assert "$40/hr" in result.full_text
 
-    async def test_generate_yields_no_milestones_for_a_short_job(
+    async def test_generate_produces_a_single_milestone_for_a_short_job(
         self, fresh_job: JobPost, profile: Profile, mock_llm: MagicMock
     ) -> None:
+        """Short fixed-price jobs (1-2 day estimate, like this $150 job) still get one
+
+        milestone covering the full scope/timeline/pricing, rather than suppressing the
+        breakdown entirely -- the pricing line folded into the close sentence alone
+        wasn't surfacing the deliverable clearly enough on its own.
+        """
         score = score_job(fresh_job, profile)
         agent = ProposalAgent(llm=mock_llm, examples=[])
 
         result = await agent.generate(fresh_job, score, profile)
 
-        assert result.milestones == []
+        assert len(result.milestones) == 1
+        assert result.milestones[0].amount_usd == 150.0
+        assert result.milestones[0].days == 2
         assert "Suggested milestones" not in result.full_text
 
     async def test_generate_yields_no_milestones_for_hourly_jobs(
