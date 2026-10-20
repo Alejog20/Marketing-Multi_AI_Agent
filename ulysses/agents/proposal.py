@@ -27,7 +27,7 @@ from pathlib import Path
 import httpx
 from langchain_core.language_models.chat_models import BaseChatModel
 from loguru import logger
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from ulysses.config.profile import Profile
 from ulysses.models import BudgetType, GeneratedProposal, JobPost, JobScore, Milestone
@@ -207,6 +207,21 @@ class _ProposalLLMOutput(BaseModel):
         "requested by the user prompt's 'Milestones to propose' count, in delivery order. "
         "Empty list if that count is 0.",
     )
+
+    @field_validator("milestones", mode="before")
+    @classmethod
+    def _coerce_empty_string_to_empty_list(cls, value: object) -> object:
+        """Tolerate Claude emitting "" instead of [] for a zero-milestone tool call.
+
+        Confirmed in production: when the prompt asks for 0 milestones, Claude's
+        tool-call args sometimes carry an empty string for this field rather than
+        an actual empty list, which strict `list[str]` validation would otherwise
+        reject outright and crash the whole proposal. Any non-empty value is passed
+        through unchanged so a genuinely malformed non-empty response still fails
+        validation (and is retried -- see `ainvoke_with_retry`) instead of being
+        silently swallowed.
+        """
+        return [] if value == "" else value
 
 
 def classify_category(job: JobPost) -> str:

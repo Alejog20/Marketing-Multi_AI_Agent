@@ -6,10 +6,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
+from pydantic import ValidationError
 from pytest_mock import MockerFixture
 
 from ulysses.agents.proposal import (
     ProposalAgent,
+    _ProposalLLMOutput,
     classify_category,
     estimate_timeline_and_bid,
     milestone_count_for_days,
@@ -179,6 +181,37 @@ class TestValidateProposalText:
 
     def test_allows_up_to_two_emoji(self) -> None:
         assert validate_proposal_text("Great fit \U0001f680 for this \U0001f525 project.") == []
+
+
+class TestProposalLlmOutputMilestonesCoercion:
+    """Regression tests for the production crash: Claude's tool-call args carried `""`
+
+    instead of `[]` for a zero-milestone response, which strict `list[str]`
+    validation rejected and crashed the whole proposal with no retry possible.
+    """
+
+    def _kwargs(self, **overrides: object) -> dict[str, object]:
+        base: dict[str, object] = {
+            "hook": "Hook.",
+            "plan_bullet_1": "Step one.",
+            "plan_bullet_2": "Step two.",
+            "plan_bullet_3": "Step three.",
+            "close": "Close.",
+        }
+        base.update(overrides)
+        return base
+
+    def test_empty_string_milestones_coerces_to_empty_list(self) -> None:
+        output = _ProposalLLMOutput(**self._kwargs(milestones=""))
+        assert output.milestones == []
+
+    def test_real_list_milestones_passes_through_unchanged(self) -> None:
+        output = _ProposalLLMOutput(**self._kwargs(milestones=["First", "Second"]))
+        assert output.milestones == ["First", "Second"]
+
+    def test_non_empty_malformed_milestones_still_raises(self) -> None:
+        with pytest.raises(ValidationError):
+            _ProposalLLMOutput(**self._kwargs(milestones="not a list"))
 
 
 class TestProposalAgentGenerate:
