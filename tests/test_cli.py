@@ -30,6 +30,7 @@ from ulysses.cli.main import (
     _start_telegram_with_retry,
     _write_prototype_to_disk,
     app,
+    run_forever,
 )
 from ulysses.config.profile import DEFAULT_PROFILE_PATH, Profile, load_profile
 from ulysses.config.settings import get_settings
@@ -126,6 +127,43 @@ class TestShutdownTelegram:
         app.stop = AsyncMock(side_effect=NetworkError("boom"))
 
         await _shutdown_telegram(app)  # must not raise
+
+
+class TestRunForever:
+    """Regression coverage for the `run_forever` task-ordering bug: creating the
+    scout/notifier/dashboard coroutines before Telegram is confirmed up meant a
+    failed Telegram startup (e.g. `InvalidToken`) left them unawaited.
+    """
+
+    async def test_telegram_failure_leaves_no_background_task_unawaited(
+        self, mocker: MockerFixture, profile: Profile
+    ) -> None:
+        settings = get_settings()
+
+        telegram_app = _telegram_app()
+        telegram_app.initialize = AsyncMock(side_effect=InvalidToken("bad token"))
+        mocker.patch("ulysses.cli.main._build_telegram_application", return_value=telegram_app)
+
+        scout_run_forever = mocker.patch(
+            "ulysses.agents.scout.ScoutAgent.run_forever", new=AsyncMock()
+        )
+        notifier_run_batch_loop = mocker.patch(
+            "ulysses.agents.notifier.NotifierAgent.run_batch_loop", new=AsyncMock()
+        )
+        dashboard_serve = mocker.patch("ulysses.cli.main._build_dashboard_server")
+
+        with pytest.raises(InvalidToken):
+            await run_forever(settings, profile)
+
+        # The whole point of the fix: none of these coroutines were ever created,
+        # because creating them (calling the async function) before Telegram
+        # succeeds is exactly what leaves a coroutine object unawaited.
+        scout_run_forever.assert_not_called()
+        notifier_run_batch_loop.assert_not_called()
+        dashboard_serve.assert_not_called()
+
+        # Cleanup must still run even on this early failure path.
+        telegram_app.shutdown.assert_awaited_once()
 
 
 class TestWritePrototypeToDisk:
