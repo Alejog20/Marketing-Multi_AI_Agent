@@ -290,6 +290,45 @@ to open the job queue, and native macOS notifications for high-scoring jobs:
 uv run python -m ulysses.app.menubar
 ```
 
+## Deploying with Docker
+
+For running on a Linux server (e.g. an AWS Lightsail instance) rather than
+your own Mac, a `Dockerfile` and `docker-compose.yml` are included so anyone
+can clone the repo and have the full agent (IMAP polling, Telegram bot, and
+dashboard) running with one command — no `uv`, no Node, no Python toolchain
+needed on the server itself; only Docker.
+
+```bash
+git clone <this-repo-url>
+cd ulysses
+cp .env.example .env   # fill in your credentials, same as the Setup section above
+docker compose up -d --build
+```
+
+Notes specific to running this way:
+
+- **Persistence**: the SQLite database and logs live in the `ulysses_data`
+  named volume (mounted at `/data` in the container, overriding
+  `ULYSSES_ULYSSES_HOME`), so `docker compose down` / image rebuilds don't
+  lose your job history. Back up the volume (`docker run --rm -v
+  ulysses_data:/data -v $PWD:/backup alpine tar czf
+  /backup/ulysses-backup.tgz /data`) before anything destructive.
+- **The dashboard stays localhost-only on purpose.** `docker-compose.yml`
+  publishes it as `127.0.0.1:8765:8765`, so it's reachable from the host
+  itself but not the public internet — it has no authentication, so it was
+  designed for the localhost-only trust model described above. On a remote
+  server, view it over an SSH tunnel instead of opening the port publicly:
+  ```bash
+  ssh -L 8765:127.0.0.1:8765 your-user@your-server-ip
+  ```
+  then open `http://127.0.0.1:8765` on your own machine.
+- **Editing `ulysses/config/profile.yaml`** (your skills/rate/thresholds)
+  after deploying: either rebuild the image (`docker compose up -d
+  --build`), or uncomment the bind-mount line in `docker-compose.yml` to
+  edit it on the host without a rebuild.
+- **Logs**: `docker compose logs -f ulysses`.
+- **Updating**: `git pull && docker compose up -d --build`.
+
 ## Development
 
 ```bash

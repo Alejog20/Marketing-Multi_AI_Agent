@@ -277,24 +277,31 @@ async def run_forever(
     telegram_app.add_handler(notifier.help_command_handler)
     telegram_app.add_handler(notifier.message_handler)
 
-    tasks = [
-        scout.run_forever(
-            settings.email_poll_interval_seconds,
-            on_scored_job,
-            stop_event=stop_event,
-            paused_event=paused_event,
-        ),
-        notifier.run_batch_loop(profile.alerts.batch_interval_minutes, stop_event=stop_event),
-    ]
     dashboard_server: uvicorn.Server | None = None
-    if settings.dashboard_enabled:
-        dashboard_server = _build_dashboard_server(
-            settings, db, profile, proposal_agent, prototype_agent, events
-        )
-        tasks.append(dashboard_server.serve())
-
     try:
+        # Telegram must come up first. Building the scout/notifier/dashboard
+        # coroutines below creates them immediately (calling an async function
+        # returns a coroutine object, it doesn't schedule it) -- if that happened
+        # before this succeeded and _start_telegram_with_retry raised, those
+        # coroutines would be discarded without ever being awaited, which Python
+        # flags with a "coroutine was never awaited" RuntimeWarning at GC time.
         await _start_telegram_with_retry(telegram_app)
+
+        tasks = [
+            scout.run_forever(
+                settings.email_poll_interval_seconds,
+                on_scored_job,
+                stop_event=stop_event,
+                paused_event=paused_event,
+            ),
+            notifier.run_batch_loop(profile.alerts.batch_interval_minutes, stop_event=stop_event),
+        ]
+        if settings.dashboard_enabled:
+            dashboard_server = _build_dashboard_server(
+                settings, db, profile, proposal_agent, prototype_agent, events
+            )
+            tasks.append(dashboard_server.serve())
+
         await asyncio.gather(*tasks)
     finally:
         if dashboard_server is not None:

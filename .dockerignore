@@ -1,0 +1,34 @@
+# Local environments and secrets -- never sent to the Docker build context.
+.venv
+.env
+.env.example
+
+# Git / CI metadata
+.git
+.github
+
+# Python build/test artifacts
+__pycache__
+*.py[oc]
+.pytest_cache
+.ruff_cache
+.coverage
+htmlcov
+*.egg-info
+
+# Ulysses runtime data -- lives in the /data volume at container runtime, not the image.
+.ulysses
+output
+
+# Frontend -- rebuilt from source by the frontend-builder stage.
+ulysses/dashboard/frontend/node_modules
+ulysses/dashboard/frontend/dist
+
+# Docs -- README.md is the only one hatchling needs (pyproject.toml's `readme` field);
+# the rest (including CLAUDE.md / AGENTS.md, which are deliberately untracked local-only
+# docs -- see .gitignore) must never end up baked into a shipped image.
+*.md
+!README.md
+
+tests
+scripts

@@ -1,0 +1,24 @@
+services:
+  ulysses:
+    build: .
+    image: ulysses-agent
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Dashboard must bind 0.0.0.0 *inside* the container for Docker's port
+      # mapping to reach it -- actual external exposure is controlled below
+      # by binding the published port to 127.0.0.1 on the host, not here.
+      ULYSSES_DASHBOARD_HOST: 0.0.0.0
+    volumes:
+      - ulysses_data:/data
+      # Uncomment to edit your profile on the host without rebuilding the image:
+      # - ./ulysses/config/profile.yaml:/app/ulysses/config/profile.yaml:ro
+    ports:
+      # Bound to localhost only -- the dashboard has no auth (see README),
+      # so reach it from a remote host via `ssh -L 8765:127.0.0.1:8765 ...`,
+      # not by changing this to "8765:8765".
+      - "127.0.0.1:8765:8765"
+
+volumes:
+  ulysses_data:
